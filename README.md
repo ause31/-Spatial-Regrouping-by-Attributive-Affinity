@@ -28,9 +28,7 @@ neighboring groups than to their own.
 ---
 
 ## Why spatialRegroup ?
-
-Administrative boundaries (EPCI, districts, regions) are often defined 
-for political or historical reasons — not statistical ones. 
+ 
 `spatialRegroup` tests whether these boundaries are **statistically 
 coherent** by asking:
 
