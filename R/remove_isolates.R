@@ -1,7 +1,7 @@
-#' Réintégrer les communes candidates isolées
+#' Reintegrer les communes candidates isolees
 #' @param data Un objet sf avec colonne "candidate"
 #' @param nb Matrice de voisinage
-#' @return data avec candidats isolés remis à FALSE
+#' @return data avec candidats isoles remis a FALSE
 #' @export
 remove_isolates <- function(data, nb) {
   candidate_ids <- which(data$candidate)
@@ -13,10 +13,10 @@ remove_isolates <- function(data, nb) {
   })
   a_corriger <- candidate_ids[isolat_idx]
   if (length(a_corriger) > 0) {
-    message(length(a_corriger), " isolat(s) réintégré(s)")
+    message(length(a_corriger), " isolat(s) reintegre(s)")
     data$candidate[a_corriger] <- FALSE
   } else {
-    message("Aucun isolat détecté")
+    message("Aucun isolat detecte")
   }
   return(data)
 }

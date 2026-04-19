@@ -1,10 +1,10 @@
-#' Regroupement spatial par affinité attributaire
+#' Regroupement spatial par affinite attributaire
 #' @param data sf object
 #' @param group_var Variable de groupe initial (ex: "EPCI")
-#' @param vars_attr Variables attributaires pour le calcul d'affinité
-#' @param remove_isolates Réintégrer les isolats (défaut TRUE)
+#' @param vars_attr Variables attributaires pour le calcul d'affinite
+#' @param remove_isolates Reintegrer les isolats (defaut TRUE)
 #' @param nb_type "queen" ou "rook"
-#' @param verbose Messages de progression (défaut TRUE)
+#' @param verbose Messages de progression (defaut TRUE)
 #' @return sf object avec colonne {group_var}_regroup
 #' @export
 spatialRegroup <- function(data, group_var, vars_attr,
@@ -19,10 +19,10 @@ spatialRegroup <- function(data, group_var, vars_attr,
   if (verbose) message("[1/5] Construction du voisinage...")
   nb <- build_neighbors(data, type = nb_type)
 
-  if (verbose) message("[2/5] Calcul des affinités...")
+  if (verbose) message("[2/5] Calcul des affinites...")
   aff <- compute_affinity(data, nb, group_var, vars_attr)
   data$candidate[aff$id_row[aff$affinite > 0]] <- TRUE
-  if (verbose) message(sum(data$candidate), " candidates identifiées")
+  if (verbose) message(sum(data$candidate), " candidates identifiees")
 
   if (remove_isolates) {
     if (verbose) message("[3/5] Suppression des isolats...")
@@ -47,7 +47,7 @@ spatialRegroup <- function(data, group_var, vars_attr,
 
   if (verbose) {
     n <- sum(data$candidate, na.rm = TRUE)
-    message("Terminé : ", n, "/", nrow(data), " unités reclassées")
+    message("Termine : ", n, "/", nrow(data), " unites reclassees")
   }
 
   return(data)
