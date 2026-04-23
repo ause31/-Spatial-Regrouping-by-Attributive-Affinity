@@ -15,6 +15,8 @@ Description: Identifies and reclassifies spatial units such as
     Includes tools for multilevel model comparison (AIC, ICC) to
     evaluate whether the recomposed grouping better explains the
     outcome variable than the original administrative partition.
+    Methods are based on spatial contiguity concepts described in
+    Anselin (1995) <doi:10.1111/j.1538-4632.1995.tb00338.x>.
 License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
