@@ -1,15 +1,26 @@
-#' Calculer les affinités attributaires des communes frontalières
+#' Calculer les affinites attributaires des communes frontalières
+#'
 #' @param data Un objet sf
 #' @param nb Matrice de voisinage (spdep)
 #' @param group_var Nom de la variable de groupe (ex: "EPCI")
 #' @param vars_attr Vecteur de noms de variables attributaires
-#' @return Un data.frame avec dist_intra, dist_extra, affinite
+#' @param method Methode de distance : "euclidean" (defaut) ou "mahalanobis"
+#' @param threshold Seuil d'affinite au-dela duquel une unite est candidate (defaut 0)
+#' @return Un data.frame avec dist_intra, dist_extra, affinite et candidat
 #' @export
-compute_affinity <- function(data, nb, group_var, vars_attr) {
+compute_affinity <- function(data, nb, group_var, vars_attr,
+                             method    = "euclidean",
+                             threshold = 0) {
 
   df      <- sf::st_drop_geometry(data)
   df_attr <- df[, vars_attr, drop = FALSE]
 
+  # Matrice de covariance pour Mahalanobis (calculee une seule fois)
+  cov_mat <- if (method == "mahalanobis") {
+    tryCatch(solve(cov(df_attr)), error = function(e) NULL)
+  } else NULL
+
+  # Identifier les unites frontalières
   frontaliers <- sapply(seq_along(nb), function(i) {
     voisins <- unlist(nb[[i]])
     voisins <- voisins[!is.na(voisins) & voisins > 0]
@@ -17,11 +28,26 @@ compute_affinity <- function(data, nb, group_var, vars_attr) {
     any(df[[group_var]][voisins] != df[[group_var]][i], na.rm = TRUE)
   })
 
+  # Fonction de distance (euclidienne ou mahalanobis)
+  dist_fn <- function(xi, mat) {
+    if (method == "mahalanobis" && !is.null(cov_mat)) {
+      mean(apply(mat, 1, function(row) {
+        tryCatch(
+          sqrt(as.numeric(t(xi - row) %*% cov_mat %*% (xi - row))),
+          error = function(e) sqrt(sum((xi - row)^2, na.rm = TRUE))
+        )
+      }), na.rm = TRUE)
+    } else {
+      mean(apply(mat, 1, function(row) {
+        sqrt(sum((xi - row)^2, na.rm = TRUE))
+      }), na.rm = TRUE)
+    }
+  }
+
   dist_mean <- function(xi, ids) {
     if (length(ids) == 0) return(NA_real_)
     mat <- as.matrix(df_attr[ids, , drop = FALSE])
-    mean(apply(mat, 1, function(row) sqrt(sum((xi - row)^2, na.rm = TRUE))),
-         na.rm = TRUE)
+    dist_fn(xi, mat)
   }
 
   affinite_list <- lapply(which(frontaliers), function(i) {
@@ -31,6 +57,7 @@ compute_affinity <- function(data, nb, group_var, vars_attr) {
     xi      <- as.numeric(df_attr[i, ])
     intra   <- voisins[df[[group_var]][voisins] == group_i]
     extra   <- voisins[df[[group_var]][voisins] != group_i]
+
     data.frame(
       id_row     = i,
       dist_intra = dist_mean(xi, intra),
@@ -39,5 +66,10 @@ compute_affinity <- function(data, nb, group_var, vars_attr) {
     )
   })
 
-  dplyr::bind_rows(affinite_list)
+  aff <- dplyr::bind_rows(affinite_list)
+
+  # Appliquer le seuil : candidat si l'affinite depasse le seuil
+  aff$candidat <- !is.na(aff$affinite) & aff$affinite > threshold
+
+  return(aff)
 }
