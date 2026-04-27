@@ -9,22 +9,45 @@
 #' @param min_group Taille minimale d'un groupe valide pour le rattachement (defaut 1)
 #' @param nb_type Type de voisinage spatial : "queen" (defaut) ou "rook"
 #' @param remove_isolates Reintegrer les candidats isoles (defaut TRUE)
+#' @param weights Vecteur de poids pour les variables attributaires (meme longueur
+#'   que vars_attr, defaut NULL = poids egaux). Applique apres standardisation.
+#'   Exemple : c(0.5, 0.3, 0.2) pour donner plus de poids au prix.
+#' @param standardize Standardiser les variables avant calcul de distance (defaut TRUE).
+#'   Recommande pour que les variables soient comparables entre elles.
+#' @param local_profile Si TRUE (defaut), compare chaque candidat au profil des membres
+#'   adjacents du groupe cible plutot qu'au centroide global du groupe. Plus
+#'   representatif pour les grands groupes heterogenes.
+#' @param cohesion_tol Seuil minimal de progression de la coherence (eta²) entre deux
+#'   iterations. L'algorithme s'arrete si la progression est inferieure a ce seuil
+#'   (defaut 0.001). Mettre a NULL pour desactiver ce critere d'arret.
 #' @param verbose Afficher les messages de progression (defaut TRUE)
 #'
-#' @return Un sf object identique a l'entree avec trois colonnes supplementaires :
-#'   \code{{group_var}_regroup} (affectation finale), \code{candidate} (TRUE si
-#'   l'unite a ete reclassee a au moins une iteration), et \code{iter_history}
-#'   (liste des affectations par iteration, sous forme d'attribut).
+#' @return Un sf object identique a l'entree avec les colonnes supplementaires :
+#'   \code{{group_var}_regroup} (affectation finale) et \code{candidate} (TRUE si
+#'   l'unite a ete reclassee).
 #'
 #' @export
 spatialRegroup <- function(data, group_var, vars_attr,
-                           method          = "euclidean",
-                           threshold       = 0,
-                           iterations      = 1,
-                           min_group       = 1,
-                           nb_type         = "queen",
+                           method        = "euclidean",
+                           threshold     = 0,
+                           iterations    = 1,
+                           min_group     = 1,
+                           nb_type       = "queen",
                            remove_isolates = TRUE,
-                           verbose         = TRUE) {
+                           weights       = NULL,
+                           standardize   = TRUE,
+                           local_profile = TRUE,
+                           cohesion_tol  = 0.001,
+                           verbose       = TRUE) {
+
+  # ── Validation des arguments ─────────────────────────────────────────────────
+  if (!is.null(weights)) {
+    if (length(weights) != length(vars_attr))
+      stop("'weights' doit avoir la meme longueur que 'vars_attr' (",
+           length(vars_attr), " variables)")
+    if (any(weights < 0))
+      stop("'weights' doit contenir des valeurs positives uniquement")
+  }
 
   data <- data %>%
     dplyr::mutate(id_row    = dplyr::row_number(),
@@ -33,12 +56,20 @@ spatialRegroup <- function(data, group_var, vars_attr,
   new_var <- paste0(group_var, "_regroup")
   data <- data |>
     dplyr::mutate(!!new_var := as.character(.data[[group_var]]))
-  # Historique des etats pour detection de cycles (point 2)
+
   states_history <- character(0)
 
-  # Voisinage calcule une seule fois (la geometrie ne change pas)
+  # ── Voisinage pre-calcule (la geometrie ne change pas) ───────────────────────
   if (verbose) message("[0/5] Pre-calcul du voisinage spatial...")
   nb <- build_neighbors(data, type = nb_type)
+
+  # ── Coherence initiale (point 4) ─────────────────────────────────────────────
+  cohesion_prev <- if (!is.null(cohesion_tol)) {
+    compute_cohesion(data, group_var, vars_attr)
+  } else NULL
+
+  if (verbose && !is.null(cohesion_tol))
+    message("Coherence initiale (eta²) : ", round(cohesion_prev, 4))
 
   for (iter in seq_len(iterations)) {
 
@@ -48,8 +79,10 @@ spatialRegroup <- function(data, group_var, vars_attr,
 
     if (verbose) message("[2/5] Calcul des affinites...")
     aff <- compute_affinity(data, nb, current_group, vars_attr,
-                            method    = method,
-                            threshold = threshold)
+                            method      = method,
+                            threshold   = threshold,
+                            weights     = weights,
+                            standardize = standardize)
 
     data$candidate <- FALSE
 
@@ -87,14 +120,18 @@ spatialRegroup <- function(data, group_var, vars_attr,
     }
 
     if (verbose) message("[5/5] Rattachement des candidats...")
-    assignments <- assign_best_group(data, current_group, vars_attr, profiles)
+    assignments <- assign_best_group(data, current_group, vars_attr, profiles,
+                                     nb            = nb,
+                                     local_profile = local_profile,
+                                     weights       = weights,
+                                     standardize   = standardize)
 
     if (nrow(assignments) == 0) {
       if (verbose) message("Aucun rattachement possible — arret")
       break
     }
 
-    # ── Etat avant affectation (point 1 : base de comparaison reelle) ────────
+    # ── Etat avant affectation ───────────────────────────────────────────────
     state_avant <- as.character(data[[new_var]])
 
     data <- data %>%
@@ -111,9 +148,8 @@ spatialRegroup <- function(data, group_var, vars_attr,
       ) %>%
       dplyr::select(-best_group_iter)
 
-    # ── Controle post-rattachement : reversion des isolats dans le nouveau groupe
-    df_tmp  <- sf::st_drop_geometry(data)
-    # Indices des unites dont le groupe a change par rapport a l'etat avant
+    # ── Controle post-rattachement : reversion des isolats ───────────────────
+    df_tmp         <- sf::st_drop_geometry(data)
     reclassees_idx <- which(as.character(df_tmp[[new_var]]) != state_avant)
 
     if (length(reclassees_idx) > 0) {
@@ -121,13 +157,10 @@ spatialRegroup <- function(data, group_var, vars_attr,
         nouveau_groupe <- df_tmp[[new_var]][i]
         voisins <- unlist(nb[[i]])
         voisins <- voisins[!is.na(voisins) & voisins > 0]
-        # Isolat si aucun voisin n'appartient au nouveau groupe
         length(voisins) == 0 ||
           !any(df_tmp[[new_var]][voisins] == nouveau_groupe, na.rm = TRUE)
       })
-
       idx_reverter <- reclassees_idx[isolats_post]
-
       if (length(idx_reverter) > 0) {
         if (verbose) message(length(idx_reverter),
                              " isolat(s) post-rattachement reverte(s)")
@@ -135,18 +168,31 @@ spatialRegroup <- function(data, group_var, vars_attr,
       }
     }
 
-    # ── Point 1 : n_reclassed = unites dont l'affectation a reellement change ─
+    # ── Comptage reclassements reels ─────────────────────────────────────────
     n_reclassed <- sum(as.character(data[[new_var]]) != state_avant, na.rm = TRUE)
-    if (verbose) message("Iteration ", iter, " : ", n_reclassed,
-                         " unites reclassees")
+    if (verbose) message("Iteration ", iter, " : ", n_reclassed, " unites reclassees")
 
-    # ── Point 1 : convergence reelle (aucun changement effectif) ─────────────
     if (n_reclassed == 0) {
       if (verbose) message("Convergence atteinte a l'iteration ", iter)
       break
     }
 
-    # ── Point 2 : detection de cycle (etat deja vu) ───────────────────────────
+    # ── Point 4 : critere d'arret sur la coherence (eta²) ───────────────────
+    if (!is.null(cohesion_tol)) {
+      cohesion_cur  <- compute_cohesion(data, new_var, vars_attr)
+      delta_cohesion <- cohesion_cur - cohesion_prev
+      if (verbose)
+        message("  Coherence (eta²) : ", round(cohesion_cur, 4),
+                " (delta = ", round(delta_cohesion, 4), ")")
+      if (delta_cohesion < cohesion_tol && iter > 1) {
+        if (verbose) message("  Progression de coherence < ", cohesion_tol,
+                             " — arret (iteration ", iter, ")")
+        break
+      }
+      cohesion_prev <- cohesion_cur
+    }
+
+    # ── Detection de cycle ────────────────────────────────────────────────────
     state_actuel <- paste(as.character(data[[new_var]]), collapse = "|")
     if (state_actuel %in% states_history) {
       if (verbose) message(
@@ -160,7 +206,6 @@ spatialRegroup <- function(data, group_var, vars_attr,
 
   # ════════════════════════════════════════════════════════════════════════════
   # POST-TRAITEMENT : isolats residuels + groupes vides
-  # Repete jusqu'a stabilite (max 50 passes de securite)
   # ════════════════════════════════════════════════════════════════════════════
   if (verbose) message("── Post-traitement : isolats residuels et groupes vides...")
 
@@ -168,10 +213,9 @@ spatialRegroup <- function(data, group_var, vars_attr,
 
   for (pass in seq_len(50)) {
 
-    df_post  <- sf::st_drop_geometry(data)
-    modifie  <- FALSE
+    df_post <- sf::st_drop_geometry(data)
+    modifie <- FALSE
 
-    # ── 1. Isolats residuels : toute unite sans voisin dans son groupe courant ──
     for (i in seq_len(nrow(data))) {
       groupe_i <- df_post[[new_var]][i]
       voisins  <- unlist(nb[[i]])
@@ -185,16 +229,11 @@ spatialRegroup <- function(data, group_var, vars_attr,
       }
     }
 
-    # ── 2. Groupes originaux vides : restituer au moins une commune ────────────
     groupes_finaux <- unique(as.character(df_post[[new_var]]))
     groupes_vides  <- setdiff(groupes_originaux, groupes_finaux)
-
     for (g in groupes_vides) {
-      # Communes initialement dans ce groupe et reclassees ailleurs
-      idx_g <- which(
-        as.character(df_post[[group_var]]) == g &
-        as.character(df_post[[new_var]])   != g
-      )
+      idx_g <- which(as.character(df_post[[group_var]]) == g &
+                       as.character(df_post[[new_var]]) != g)
       if (length(idx_g) > 0) {
         data[[new_var]][idx_g[1]]    <- g
         df_post[[new_var]][idx_g[1]] <- g
@@ -208,26 +247,28 @@ spatialRegroup <- function(data, group_var, vars_attr,
     }
   }
 
-  # ── Bilan post-traitement ───────────────────────────────────────────────────
-  groupes_finaux_ok <- unique(as.character(sf::st_drop_geometry(data)[[new_var]]))
-  groupes_vides_restants <- setdiff(groupes_originaux, groupes_finaux_ok)
-  if (length(groupes_vides_restants) > 0 && verbose)
-    message("  Attention : ", length(groupes_vides_restants),
-            " groupe(s) encore vide(s) apres post-traitement")
+  # ── Coherence finale ─────────────────────────────────────────────────────────
+  cohesion_finale <- if (!is.null(cohesion_tol)) {
+    compute_cohesion(data, new_var, vars_attr)
+  } else compute_cohesion(data, new_var, vars_attr)
 
-  # ── candidate = unites effectivement reclassees (groupe initial != final) ───
+  cohesion_init <- compute_cohesion(data, group_var, vars_attr)
+
+  # ── candidate = unites effectivement reclassees ───────────────────────────
   data <- data %>%
     dplyr::mutate(
       candidate = as.character(.data[[group_var]]) != as.character(.data[[new_var]])
     )
 
   if (verbose) {
-    n_total <- sum(data$candidate, na.rm = TRUE)
-    n_groupes_init  <- length(groupes_originaux)
-    n_groupes_final <- length(groupes_finaux_ok)
+    n_total         <- sum(data$candidate, na.rm = TRUE)
+    groupes_finaux_ok <- unique(as.character(sf::st_drop_geometry(data)[[new_var]]))
     message("Termine : ", n_total, "/", nrow(data), " unites reclassees")
-    message("Groupes : ", n_groupes_init, " (initial) -> ",
-            n_groupes_final, " (final)")
+    message("Groupes : ", length(groupes_originaux), " (initial) -> ",
+            length(groupes_finaux_ok), " (final)")
+    message("Coherence (eta²) : ", round(cohesion_init, 4),
+            " (initial) -> ", round(cohesion_finale, 4),
+            " (final, gain = ", round(cohesion_finale - cohesion_init, 4), ")")
   }
 
   return(data)
