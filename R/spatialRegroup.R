@@ -158,6 +158,63 @@ spatialRegroup <- function(data, group_var, vars_attr,
     states_history <- c(states_history, state_actuel)
   }
 
+  # ════════════════════════════════════════════════════════════════════════════
+  # POST-TRAITEMENT : isolats residuels + groupes vides
+  # Repete jusqu'a stabilite (max 50 passes de securite)
+  # ════════════════════════════════════════════════════════════════════════════
+  if (verbose) message("── Post-traitement : isolats residuels et groupes vides...")
+
+  groupes_originaux <- unique(as.character(sf::st_drop_geometry(data)[[group_var]]))
+
+  for (pass in seq_len(50)) {
+
+    df_post  <- sf::st_drop_geometry(data)
+    modifie  <- FALSE
+
+    # ── 1. Isolats residuels : toute unite sans voisin dans son groupe courant ──
+    for (i in seq_len(nrow(data))) {
+      groupe_i <- df_post[[new_var]][i]
+      voisins  <- unlist(nb[[i]])
+      voisins  <- voisins[!is.na(voisins) & voisins > 0]
+      est_isole <- length(voisins) == 0 ||
+        !any(df_post[[new_var]][voisins] == groupe_i, na.rm = TRUE)
+      if (est_isole && df_post[[new_var]][i] != df_post[[group_var]][i]) {
+        data[[new_var]][i]    <- as.character(df_post[[group_var]][i])
+        df_post[[new_var]][i] <- as.character(df_post[[group_var]][i])
+        modifie <- TRUE
+      }
+    }
+
+    # ── 2. Groupes originaux vides : restituer au moins une commune ────────────
+    groupes_finaux <- unique(as.character(df_post[[new_var]]))
+    groupes_vides  <- setdiff(groupes_originaux, groupes_finaux)
+
+    for (g in groupes_vides) {
+      # Communes initialement dans ce groupe et reclassees ailleurs
+      idx_g <- which(
+        as.character(df_post[[group_var]]) == g &
+        as.character(df_post[[new_var]])   != g
+      )
+      if (length(idx_g) > 0) {
+        data[[new_var]][idx_g[1]]    <- g
+        df_post[[new_var]][idx_g[1]] <- g
+        modifie <- TRUE
+      }
+    }
+
+    if (!modifie) {
+      if (verbose) message("  Post-traitement stable apres ", pass, " passe(s)")
+      break
+    }
+  }
+
+  # ── Bilan post-traitement ───────────────────────────────────────────────────
+  groupes_finaux_ok <- unique(as.character(sf::st_drop_geometry(data)[[new_var]]))
+  groupes_vides_restants <- setdiff(groupes_originaux, groupes_finaux_ok)
+  if (length(groupes_vides_restants) > 0 && verbose)
+    message("  Attention : ", length(groupes_vides_restants),
+            " groupe(s) encore vide(s) apres post-traitement")
+
   # ── candidate = unites effectivement reclassees (groupe initial != final) ───
   data <- data %>%
     dplyr::mutate(
@@ -166,8 +223,11 @@ spatialRegroup <- function(data, group_var, vars_attr,
 
   if (verbose) {
     n_total <- sum(data$candidate, na.rm = TRUE)
-    message("Termine : ", n_total, "/", nrow(data),
-            " unites reclassees au total")
+    n_groupes_init  <- length(groupes_originaux)
+    n_groupes_final <- length(groupes_finaux_ok)
+    message("Termine : ", n_total, "/", nrow(data), " unites reclassees")
+    message("Groupes : ", n_groupes_init, " (initial) -> ",
+            n_groupes_final, " (final)")
   }
 
   return(data)
